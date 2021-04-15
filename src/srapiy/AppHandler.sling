@@ -1,0 +1,180 @@
+
+/*
+ * This file is part of Sling Samples
+ * Copyright (c) 2016-2021 J42 Pte Ltd
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+import jk.env
+import jk.jwt
+import jk.time
+
+class #webapi2:
+
+model User
+{
+	username as string
+	password as string
+}
+
+model Session
+{
+	username as string
+	timeStamp as long
+}
+
+model Person
+{
+	name as string
+	gender as string
+	age as int
+}
+
+model TokenResponse
+{
+	token as string
+}
+
+var db as AppDatabase
+
+func getDatabase as AppDatabase
+{
+	if not db {
+		db = AppDatabase.forContext(getCtx())
+		db.updateTables()
+	}
+	return db
+}
+
+func getPublicCredential as string:
+	return EnvironmentVariable.get("APP_PUBLIC_KEY")
+
+func getPrivateCredential as string:
+	return EnvironmentVariable.get("APP_PRIVATE_KEY")
+
+func generateRefreshTokenForSession(sessionId as string) as string
+{
+	var jwt = new JWT()
+	jwt.setClaim("session", sessionId)
+	var now = SystemClock.asUTCSeconds()
+	var exp = now + 60 * 60 * 24 * 365
+	jwt.setIssuedAt(now)
+	jwt.setExpirationTime(exp)
+	return jwt.generateTokenWithRS256(getPrivateCredential())
+}
+
+POST "/register"
+{
+	var data = assert User.forJsonString(req.getBodyString()):
+		sendError "invalidRequest"
+	var user = new AppDatabase.User()
+	user.setUsername(data.getUsername())
+	user.setPassword(data.getPassword())
+	assert getDatabase().register(user):
+		sendError "failedToAddUserInformation"
+	sendOk
+}
+
+POST "/login"
+{
+	var data = assert User.forJsonString(req.getBodyString()):
+		sendError "invalidRequest"
+	var user = new AppDatabase.User()
+	user.setUsername(data.getUsername())
+	user.setPassword(data.getPassword())
+	assert getDatabase().validateCredentials(user):
+		sendError "internalError"
+	var session = assert getDatabase().createSession(user.getUsername()):
+		sendError "failedToCreateSession"
+	var refreshToken = assert generateRefreshTokenForSession(session.getSessionId()):
+		sendError "failedToCreateRefreshToken"
+	var token = new TokenResponse()
+	token.setToken(refreshToken)
+	sendOk token
+}
+
+GET "/logout"
+{
+	var publicCred = getPublicCredential()
+	if String.isEmpty(publicCred):
+		sendError "noPublicKeyFound"
+	var auth = assert req.getHeaderValue("authorization")
+	assert String.startsWith(auth, "Bearer ")
+	var token = String.getEndOfString(auth, 7)
+	assert String.isNotEmpty(token)
+	var rmap = new map
+	Map.set(rmap, "rs256", publicCred)
+	var jwt = assert JWT.decode(token, rmap):
+		sendError "internalServerError"
+	assert jwt.isActive():
+		sendError "expiredToken"
+	var session = assert getDatabase().getSessionById(jwt.getClaim("session")):
+		sendError "invalidSession"
+	if not getDatabase().logout(session.getSessionId()):
+		sendError "failedToDeleteSession"
+	sendOk
+}
+
+GET "/persons"
+{
+	var persons = assert getDatabase().getPersons():
+		sendError "noRecordFound"
+	sendOk persons
+}
+
+GET "/person/:id"
+{
+	var persons = assert getDatabase().getPerson(vars.getString("id")):
+		sendError "noRecordFound"
+	sendOk persons
+}
+
+POST "/person"
+{
+	var data = assert Person.forJsonString(req.getBodyString()):
+		sendError "invalidRequest"
+	var person = new AppDatabase.Person()
+	person.setName(data.getName())
+	person.setGender(data.getGender())
+	person.setAgeValue(data.getAgeValue())
+	assert getDatabase().addPerson(person):
+		sendError "failedToAddPerson"
+	sendOk
+}
+
+PUT "/person/:id"
+{
+	var data = assert Person.forJsonString(req.getBodyString()):
+		sendError "invalidRequest"
+	var person = new AppDatabase.Person()
+	person.setName(data.getName())
+	person.setGender(data.getGender())
+	person.setAgeValue(data.getAgeValue())
+	assert getDatabase().updatePerson(vars.getString("id"), person):
+		sendError "failedToUpdatePerson"
+	sendOk
+}
+
+DELETE "/person/:id"
+{
+	assert getDatabase().deletePerson(vars.getString("id")):
+		sendError "failedToDeletePerson"
+	sendOk
+}

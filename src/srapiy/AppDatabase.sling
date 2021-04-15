@@ -1,0 +1,253 @@
+
+/*
+ * This file is part of Sling Samples
+ * Copyright (c) 2016-2021 J42 Pte Ltd
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+import jk.mysql
+import jk.bcrypt
+import jk.sha
+import jk.random
+import jk.log
+import jk.sql
+import jk.env
+import jk.time
+
+class:
+
+model User
+{
+	id as string
+	username as string
+	password as string
+}
+
+model Session
+{
+	sessionId as string
+	username as string
+	timeStamp as long
+}
+
+model Person
+{
+	personId as string
+	name as string
+	gender as string
+	age as int
+}
+
+const BCRYPT_ITERATION_COUNT = 12
+const USER = "user"
+const SESSION = "session"
+const PERSON = "person"
+pvar db as MySQLDatabase
+pvar sessionTTL as long = 60 * 60 * 24
+var bcrypt private as BCryptEncoder
+var sha private as SHAEncoder
+var random private as Random
+
+ctor
+{
+	bcrypt = BCryptEncoder.create()
+	sha = SHAEncoder.create()
+	random = new Random()
+}
+
+func forContext(ctx as LoggingContext) static as this
+{
+	var cstr = EnvironmentVariable.get("SRAPIY_DATABASE")
+	Log.debug(ctx, "Opening database connection: `" .. cstr .. "'")
+	var db = MySQLDatabase.forConnectionStringSync(ctx, cstr)
+	if not db:
+		Error.throw("failedToConnectToDatabase", cstr)
+	var v = new this()
+	v.setDb(db)
+	return v
+}
+
+func close
+{
+	if db:
+		db.closeSync()
+	db = null
+}
+
+func updateTable(table as SQLTableInfo)
+{
+	if not table:
+		Error.throw("nullTable", "updateTable")
+	if not db:
+		Error.throw("nullDb", "updateTable")
+	if not db.ensureTableExistsSync(table):
+		Error.throw("failedToUpdateTable", table.getName())
+}
+
+func updateTables
+{
+	var user = SQLTableInfo.forName(USER)
+	user.addStringKeyColumn("id")
+	user.addStringColumn("username")
+	user.addStringColumn("password")
+	updateTable(user)
+	var session = SQLTableInfo.forName(SESSION)
+	session.addStringKeyColumn("sessionId")
+	session.addStringColumn("username")
+	session.addLongColumn("timeStamp")
+	updateTable(session)
+	var person = SQLTableInfo.forName(PERSON)
+	person.addStringKeyColumn("personId")
+	person.addStringColumn("name")
+	person.addStringColumn("gender")
+	person.addIntegerColumn("age")
+	updateTable(person)
+}
+
+func register(user as User) as User
+{
+	assert user
+	user.setId(generateCode("USR-"))
+	var passwordHash = assert bcrypt.hashPassword(user.getPassword(), bcrypt.generateSalt(BCRYPT_ITERATION_COUNT))
+	user.setPassword(passwordHash)
+	assert db.executeSync(db.prepareInsertStatementSync(USER, user.toDynamicMap()))
+	return user
+}
+
+func generateCode(prefix as string = null) private as string:
+	return hashText(generateId(prefix))
+
+func hashText(rawText as string) private as string:
+	return sha.encodeAsString(String.toUTF8Buffer(rawText), SHAEncoder.SHA256)
+
+func generateId(prefix as string = null, length as int = 64, allCaps as bool = true) private as string
+{
+	var sb = StringBuilder.forString(prefix)
+	var l = length
+	if l < 8:
+		l = 8
+	for(var i = 0; i < l; i++) {
+		if random.nextInt(0, 2) == 0 {
+			sb.appendCharacter(random.nextInt(48, 58) as! char)
+		}
+		else {
+			if allCaps {
+				sb.appendCharacter(Character.toUppercase(random.nextInt(97, 123) as! char))
+			}
+			else {
+				if random.nextInt(0, 2) == 0 {
+					sb.appendCharacter(Character.toUppercase(random.nextInt(97, 123) as! char))
+				}
+				else {
+					sb.appendCharacter(random.nextInt(97, 123) as! char)
+				}
+			}
+		}
+	}
+	return sb.toString()
+}
+
+func validateCredentials(user as User) as User
+{
+	var criteria = new map
+	criteria["username"] = user.getUsername()
+	var v = assert db.querySingleRowSync(db.prepareQueryWithCriteriaStatementSync(USER, DynamicMap.asDynamicMap(criteria)))
+	var u = User.forJsonObject(v)
+	assert checkPassword(user.getPassword(), u.getPassword())
+	return user
+}
+
+func checkPassword(plainPassword as string, hashPassword as string) private as bool:
+	return bcrypt.checkPassword(plainPassword, hashPassword)
+
+func createSession(username as string) as Session
+{
+	var session = new Session()
+	session.setSessionId(generateCode())
+	session.setUsername(username)
+	session.setTimeStampValue(SystemClock.asUTCSeconds())
+	assert db.executeSync(db.prepareInsertStatementSync(SESSION, session.toDynamicMap()))
+	return session
+}
+
+func getSessionById(sessionId as string) as Session
+{
+	var criteria = new map
+	criteria["sessionId"] = sessionId
+	var v = assert db.querySingleRowSync(db.prepareQueryWithCriteriaStatementSync(SESSION, DynamicMap.asDynamicMap(criteria)))
+	return Session.forJsonObject(v)
+}
+
+func logout(sessionId as string) as bool
+{
+	var criteria = new Session()
+	criteria.setSessionId(sessionId)
+	return db.executeSync(db.prepareDeleteStatementSync(SESSION, criteria.toDynamicMap()))
+}
+
+func getPersons as DynamicMap
+{
+	var v = new vector<Person>
+	var it = assert db.querySync(db.prepareQueryAllStatementSync(PERSON)):
+		return null
+	while it {
+		var o = it.next()
+		if not o:
+			break
+		var person = Person.forJsonObject(o)
+		if not person:
+			continue
+		v += person
+	}
+	var data = new DynamicMap()
+	data.setObject("records", v)
+	return data
+}
+
+func getPerson(personId as string) as Person
+{
+	var criteria = new map
+	criteria["personId"] = personId
+	var v = assert db.querySingleRowSync(db.prepareQueryWithCriteriaStatementSync(PERSON, DynamicMap.asDynamicMap(criteria)))
+	return Person.forJsonObject(v)
+}
+
+func addPerson(person as Person) as Person
+{
+	assert person
+	person.setPersonId(generateCode())
+	assert db.executeSync(db.prepareInsertStatementSync(PERSON, person.toDynamicMap()))
+	return person
+}
+
+func updatePerson(id as string, person as Person) as bool
+{
+	assert person
+	var criteria = new Person()
+	criteria.setPersonId(id)
+	return db.executeSync(db.prepareUpdateStatementSync(PERSON, criteria.toDynamicMap(), person.toDynamicMap()))
+}
+
+func deletePerson(personId as string) as bool
+{
+	var criteria = new Person()
+	criteria.setPersonId(personId)
+	return db.executeSync(db.prepareDeleteStatementSync(PERSON, criteria.toDynamicMap()))
+}

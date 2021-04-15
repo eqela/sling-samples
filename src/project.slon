@@ -1,0 +1,14 @@
+{
+	vendorId "eqela"
+	projectId "sling-samples"
+	title "Sling Samples"
+	libraries [
+		"jk-core:0.38.0"
+		"jk-data:0.33.0"
+		"jk-net:0.41.0"
+		"jk-app:0.28.0"
+		"jk-gfx:0.21.0"
+		"jk-server:0.22.0"
+		"jk-db:0.21.0"
+	]
+}
